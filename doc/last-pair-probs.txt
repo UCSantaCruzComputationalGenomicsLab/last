@@ -1,0 +1,176 @@
+last-pair-probs
+===============
+
+This script reads alignments of paired DNA reads to a genome, and:
+
+1. estimates the distribution of distances between paired reads,
+2. estimates the probability that each alignment represents the
+   genomic source of the read.
+
+The script takes as input two files of alignments, where one read from
+each pair is in one file, and the other read is in the other file.
+
+Typical usage::
+
+  lastdb -m1111110 humandb human/chr*.fa
+  lastal -Q1 -e120 -i1 humandb reads1.fastq > temp1.maf
+  lastal -Q1 -e120 -i1 humandb reads2.fastq > temp2.maf
+  last-pair-probs.py temp1.maf temp2.maf > results.maf
+
+If your reads come from potentially-spliced RNA molecules, use the -r
+option::
+
+  last-pair-probs.py -r temp1.maf temp2.maf > results.maf
+
+Without -r, it assumes the distances between paired reads follow a
+normal distribution.  With -r, it assumes the distances follow a
+skewed (log-normal) distribution, which is much more appropriate for
+spliced RNA.
+
+Details
+-------
+
+* The script writes the alignments with "mismap" probabilities,
+  i.e. the probability that the alignment does not represent the
+  genomic source of the read.  By default, it discards alignments with
+  mismap probability > 0.01.
+
+* It assumes that each pair of reads comes from opposite strands of a
+  DNA molecule.  The "distance" between them means the distance
+  between their 5' ends.  Positive distance indicates tail-to-tail
+  orientation (with the 5' end being the head and the 3' end being the
+  tail).  Negative distance indicates head-to-head orientation.
+  Negative distances are not considered when -r is used, nor for
+  circular chromosomes.
+
+* The script reads one batch of alignments at a time from each file
+  (by looking for lines starting with "# batch").  It assumes that
+  each pair of batches has the alignments for one pair of reads.  To
+  achieve that, the read pairs should be in the same order in the
+  fastq files, and the lastal -i1 option ensures there is one query
+  per batch.
+
+* The input files may be in either format produced by lastal (maf or
+  tabular).  They must include header lines (of the kind produced by
+  lastal) describing the alignment parameters.
+
+* By default, the script makes two passes over each file.  So they
+  must be real files (not pipes).  However, if you use option -e, or
+  both -f and -s, it makes just one pass over each file.
+
+* If a read name ends in neither "/1" nor "/2", the script appends
+  "/1" if it comes from the first file or "/2" if it comes from the
+  second.
+
+Options
+-------
+
+  -h, --help
+         Print a help message and exit.
+
+  -r, --rna
+         Specifies that the fragments are from potentially-spliced RNA.
+
+  -e, --estdist
+         Just estimate the distribution of distances.
+
+  -m M, --mismap=M
+         Don't write alignments with mismap probability > M.
+
+  -f BP, --fraglen=BP
+         The mean distance in bp.  (With -r, the mean of
+         ln[distance].)  If this is not specified, the script will
+         estimate it from the alignments.
+
+  -s BP, --sdev=BP
+         The standard deviation of distance in bp.  (With -r, the
+         standard deviation of ln[distance].)  If this is not
+         specified, the script will estimate it from the alignments.
+
+  -d PROB, --disjoint=PROB
+         The prior probability that a pair of reads comes from
+         disjoint locations (e.g., different chromosomes).  This may
+         arise from real differences between the genome and the source
+         of the reads, or from errors in obtaining the reads or the
+         genome sequence.
+
+  -c CHROM, --circular=CHROM
+         Specifies that the chromosome named CHROM is circular.  You
+         can use this option more than once (e.g., -c chrM -c chrP).
+         As a special case, "." means all chromosomes are circular.
+         If this option is not used, "chrM" is assumed to be circular
+         (but if it is used, only the specified CHROMs are assumed to
+         be circular.)
+
+Tips
+----
+
+* For greater speed and convenience, first estimate the distance
+  distribution from a sample of your data (using -e), then analyze all
+  your data with this estimate (using -f and -s).
+
+* You can avoid temp files by using named pipes::
+
+    mkfifo pipe1 pipe2
+    lastal -Q1 -e120 -i1 humandb reads1.fastq > pipe1 &
+    lastal -Q1 -e120 -i1 humandb reads2.fastq > pipe2 &
+    last-pair-probs.py -f250 -s30 pipe1 pipe2 > results.maf
+
+  This streams the alignments from lastal to last-pair-probs.
+
+* To go faster, try a fast version of Python such as PyPy.
+
+* To go really fast, try gapless alignment (add -j1 to the lastal
+  options).  Often, this is only minusculely less accurate than gapped
+  alignment.
+
+* Tabular output (lastal option -f0) is smaller and faster.
+
+Using multiple CPUs
+-------------------
+
+With large datasets, it's important to go faster by using multiple
+CPUs.  One way to do that is by using GNU parallel
+(http://www.gnu.org/software/parallel/), as follows.
+
+* Split reads1.fastq into multiple files, with (say) 100000 reads per
+  file::
+
+    split -l400000 -a5 reads1.fastq 1
+
+  This assumes that a new fastq record begins every 4th line, i.e. no
+  line wrapping.  The created files will be called 1aaaaa, 1aaaab,
+  etc.
+
+* Split reads2.fastq::
+
+    split -l400000 -a5 reads2.fastq 2
+
+* Make a file called (say) last-pair.sh, with the following content
+  (or similar - you might want to use -r, -j1, etc)::
+
+    #! /bin/sh
+    lastal -Q1 -e120 -i1 "$3" "$4" > /tmp/$$.1
+    lastal -Q1 -e120 -i1 "$3" "$5" > /tmp/$$.2
+    last-pair-probs.py -f "$1" -s "$2" /tmp/$$.1 /tmp/$$.2
+    rm /tmp/$$.*
+
+* Set execute permission::
+
+    chmod +x last-pair.sh
+
+* Run it in parallel on all your CPU cores::
+
+    parallel --xapply ./last-pair.sh 250 30 humandb ::: 1* ::: 2* > results.maf
+
+  Here we have specified a mean distance of 250 and a standard
+  deviation of 30.
+
+Reference
+---------
+
+For more information, please see this article:
+
+  An approximate Bayesian approach for mapping paired-end DNA reads to
+  a reference genome.  Shrestha AM, Frith MC.  Bioinformatics 2013
+  29(8):965-972.
